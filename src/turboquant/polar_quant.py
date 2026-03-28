@@ -189,6 +189,8 @@ class TurboQuantCache(DynamicCache):
         self.quantizer     = TurboQuantProd(dim, bits, codebooks)
         self._comp_k       = {}
         self._comp_v       = {}
+        self.key_cache     = []
+        self.value_cache   = []
         self.bits          = bits
         self.bits_original = 0
 
