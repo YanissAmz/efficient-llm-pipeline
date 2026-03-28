@@ -204,7 +204,8 @@ def solve(req: SolveRequest):
     compression_ratio = None
     if use_tq and state.codebooks is not None:
         from src.turboquant.polar_quant import TurboQuantCache
-        head_dim = state.model.config.hidden_size // state.model.config.num_attention_heads
+        cfg = getattr(state.model.config, 'text_config', state.model.config)
+        head_dim = cfg.hidden_size // cfg.num_attention_heads
         cache = TurboQuantCache(dim=head_dim, bits=state.tq_bits, codebooks=state.codebooks)
         kwargs["past_key_values"] = cache
         compression_ratio = round(16 / state.tq_bits, 1)
