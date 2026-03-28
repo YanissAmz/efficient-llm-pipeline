@@ -192,6 +192,12 @@ class TurboQuantCache(DynamicCache):
         self.bits          = bits
         self.bits_original = 0
 
+        # Attributs requis par les couches GatedDeltaNet (linear attention) de Qwen3.5
+        # Ces couches utilisent un cache récurrent, pas KV — on les laisse passer sans compression
+        self.has_previous_state = False
+        self.ssm_states         = {}
+        self.conv_states        = {}
+
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         device = key_states.device
         self.quantizer = self.quantizer.to(device)
