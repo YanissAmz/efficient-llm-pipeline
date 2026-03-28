@@ -224,6 +224,7 @@ class TurboQuantCache(DynamicCache):
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         device = key_states.device
+        dtype  = key_states.dtype
         self.quantizer = self.quantizer.to(device)
 
         k_idx, k_qjl, k_norm, k_hat = self.quantizer.quantize(key_states)
@@ -248,7 +249,21 @@ class TurboQuantCache(DynamicCache):
 
         self.bits_original += (key_states.numel() + value_states.numel()) * 16
 
-        return k_hat.to(key_states.dtype), v_hat.to(value_states.dtype)
+        # Décompresser le cache COMPLET pour que l'attention voie tout le contexte
+        ck = self._comp_k[layer_idx]
+        cv = self._comp_v[layer_idx]
+        full_k = self.quantizer.dequantize(ck[0], ck[1], ck[2]).to(dtype)
+        full_v = self.quantizer.dequantize(cv[0], cv[1], cv[2]).to(dtype)
+
+        # Mettre à jour le cache parent pour que get_seq_length() etc. fonctionnent
+        if layer_idx >= len(self.key_cache):
+            self.key_cache.append(full_k)
+            self.value_cache.append(full_v)
+        else:
+            self.key_cache[layer_idx] = full_k
+            self.value_cache[layer_idx] = full_v
+
+        return full_k, full_v
 
     @property
     def compression_ratio(self) -> float:
