@@ -206,7 +206,7 @@ def solve(req: SolveRequest):
         from src.turboquant.polar_quant import TurboQuantCache
         cfg = getattr(state.model.config, 'text_config', state.model.config)
         head_dim = cfg.hidden_size // cfg.num_attention_heads
-        cache = TurboQuantCache(dim=head_dim, bits=state.tq_bits, codebooks=state.codebooks)
+        cache = TurboQuantCache(dim=head_dim, bits=state.tq_bits, codebooks=state.codebooks, model=state.model)
         kwargs["past_key_values"] = cache
         compression_ratio = round(16 / state.tq_bits, 1)
 

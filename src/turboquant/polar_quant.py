@@ -184,7 +184,7 @@ class TurboQuantCache(DynamicCache):
         codebooks: dict retourné par build_codebooks()
     """
 
-    def __init__(self, dim: int, bits: int, codebooks: dict):
+    def __init__(self, dim: int, bits: int, codebooks: dict, model=None):
         super().__init__()
         self.quantizer     = TurboQuantProd(dim, bits, codebooks)
         self._comp_k       = []
@@ -193,10 +193,43 @@ class TurboQuantCache(DynamicCache):
         self.bits_original = 0
 
         # Attributs requis par les couches GatedDeltaNet (linear attention) de Qwen3.5
-        # Ces couches utilisent un cache récurrent, pas KV — on les laisse passer sans compression
         self.has_previous_state = False
-        self.ssm_states         = {}
         self.conv_states        = {}
+        self.recurrent_states   = {}
+
+        if model is not None:
+            self._init_recurrent_states(model)
+
+    def _init_recurrent_states(self, model):
+        """Pré-alloue les états zéro pour les couches GatedDeltaNet de Qwen3.5."""
+        # Naviguer jusqu'aux decoder layers
+        lm = model
+        for attr in ('model', 'language_model', 'model'):
+            if hasattr(lm, attr):
+                lm = getattr(lm, attr)
+        if not hasattr(lm, 'layers'):
+            return
+
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
+
+        for layer in lm.layers:
+            if not hasattr(layer, 'linear_attn'):
+                continue
+            la = layer.linear_attn
+            idx = la.layer_idx
+
+            # Conv state : (batch=1, conv_dim, d_conv)
+            if hasattr(la, 'conv1d'):
+                conv_dim = la.conv1d.weight.shape[0]
+                d_conv   = la.conv1d.weight.shape[2]
+                self.conv_states[idx] = torch.zeros(1, conv_dim, d_conv, device=device, dtype=dtype)
+
+            # Recurrent state : (batch=1, num_heads, head_dim, head_dim)
+            num_heads = getattr(la, 'num_heads', None)
+            head_dim  = getattr(la, 'head_dim', None)
+            if num_heads and head_dim:
+                self.recurrent_states[idx] = torch.zeros(1, num_heads, head_dim, head_dim, device=device, dtype=dtype)
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         device = key_states.device
