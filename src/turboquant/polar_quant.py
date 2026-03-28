@@ -187,8 +187,8 @@ class TurboQuantCache(DynamicCache):
     def __init__(self, dim: int, bits: int, codebooks: dict, model=None):
         super().__init__()
         self.quantizer     = TurboQuantProd(dim, bits, codebooks)
-        self._comp_k       = []
-        self._comp_v       = []
+        self._comp_k       = {}
+        self._comp_v       = {}
         self.bits          = bits
         self.bits_original = 0
 
@@ -227,12 +227,14 @@ class TurboQuantCache(DynamicCache):
         dtype  = key_states.dtype
         self.quantizer = self.quantizer.to(device)
 
-        k_idx, k_qjl, k_norm, k_hat = self.quantizer.quantize(key_states)
-        v_idx, v_qjl, v_norm, v_hat = self.quantizer.quantize(value_states)
+        # Quantize les nouveaux KV
+        k_idx, k_qjl, k_norm, _ = self.quantizer.quantize(key_states)
+        v_idx, v_qjl, v_norm, _ = self.quantizer.quantize(value_states)
 
-        if layer_idx >= len(self._comp_k):
-            self._comp_k.append((k_idx, k_qjl, k_norm))
-            self._comp_v.append((v_idx, v_qjl, v_norm))
+        # Stocker les données compressées
+        if layer_idx not in self._comp_k:
+            self._comp_k[layer_idx] = (k_idx, k_qjl, k_norm)
+            self._comp_v[layer_idx] = (v_idx, v_qjl, v_norm)
         else:
             ok = self._comp_k[layer_idx]
             ov = self._comp_v[layer_idx]
@@ -249,19 +251,18 @@ class TurboQuantCache(DynamicCache):
 
         self.bits_original += (key_states.numel() + value_states.numel()) * 16
 
-        # Décompresser le cache COMPLET pour que l'attention voie tout le contexte
+        # Décompresser le cache COMPLET et laisser le parent DynamicCache gérer le stockage
         ck = self._comp_k[layer_idx]
         cv = self._comp_v[layer_idx]
         full_k = self.quantizer.dequantize(ck[0], ck[1], ck[2]).to(dtype)
         full_v = self.quantizer.dequantize(cv[0], cv[1], cv[2]).to(dtype)
 
-        # Mettre à jour le cache parent pour que get_seq_length() etc. fonctionnent
-        if layer_idx >= len(self.key_cache):
-            self.key_cache.append(full_k)
-            self.value_cache.append(full_v)
-        else:
-            self.key_cache[layer_idx] = full_k
-            self.value_cache[layer_idx] = full_v
+        # Remplacer dans le cache parent (DynamicCache utilise des listes indexées séquentiellement)
+        while layer_idx >= len(self.key_cache):
+            self.key_cache.append(torch.empty(0))
+            self.value_cache.append(torch.empty(0))
+        self.key_cache[layer_idx] = full_k
+        self.value_cache[layer_idx] = full_v
 
         return full_k, full_v
 
