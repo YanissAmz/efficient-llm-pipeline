@@ -202,34 +202,25 @@ class TurboQuantCache(DynamicCache):
 
     def _init_recurrent_states(self, model):
         """Pré-alloue les états zéro pour les couches GatedDeltaNet de Qwen3.5."""
-        # Naviguer jusqu'aux decoder layers
-        lm = model
-        for attr in ('model', 'language_model', 'model'):
-            if hasattr(lm, attr):
-                lm = getattr(lm, attr)
-        if not hasattr(lm, 'layers'):
-            return
-
         device = next(model.parameters()).device
         dtype = next(model.parameters()).dtype
 
-        for layer in lm.layers:
-            if not hasattr(layer, 'linear_attn'):
+        for _, mod in model.named_modules():
+            if not (hasattr(mod, 'conv1d') and hasattr(mod, 'layer_idx')):
                 continue
-            la = layer.linear_attn
-            idx = la.layer_idx
+            idx = mod.layer_idx
 
             # Conv state : (batch=1, conv_dim, d_conv)
-            if hasattr(la, 'conv1d'):
-                conv_dim = la.conv1d.weight.shape[0]
-                d_conv   = la.conv1d.weight.shape[2]
-                self.conv_states[idx] = torch.zeros(1, conv_dim, d_conv, device=device, dtype=dtype)
+            conv_dim = mod.conv1d.weight.shape[0]
+            d_conv   = mod.conv1d.weight.shape[2]
+            self.conv_states[idx] = torch.zeros(1, conv_dim, d_conv, device=device, dtype=dtype)
 
-            # Recurrent state : (batch=1, num_heads, head_dim, head_dim)
-            num_heads = getattr(la, 'num_heads', None)
-            head_dim  = getattr(la, 'head_dim', None)
-            if num_heads and head_dim:
-                self.recurrent_states[idx] = torch.zeros(1, num_heads, head_dim, head_dim, device=device, dtype=dtype)
+            # Recurrent state : (batch=1, num_v_heads, head_v_dim, head_k_dim)
+            nv = getattr(mod, 'num_v_heads', getattr(mod, 'num_k_heads', None))
+            hv = getattr(mod, 'head_v_dim', None)
+            hk = getattr(mod, 'head_k_dim', None)
+            if nv and hv and hk:
+                self.recurrent_states[idx] = torch.zeros(1, nv, hv, hk, device=device, dtype=dtype)
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         device = key_states.device
