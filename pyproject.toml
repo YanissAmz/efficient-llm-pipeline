@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "efficient-llm-pipeline"
+version = "0.1.0"
+description = "Qwen3.5-2B fine-tuné sur GSM8K avec compression TurboQuant du KV cache"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers",
+    "datasets",
+    "accelerate",
+    "fastapi",
+    "pydantic",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
