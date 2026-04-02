@@ -1,0 +1,49 @@
+# Training configuration
+model:
+  name: "Qwen/Qwen3-4B"
+  max_seq_length: 1024
+  load_in_4bit: true
+
+dataset:
+  name: "openai/gsm8k"
+  split: "main"
+  subset: "train"
+  max_samples: null  # null = use all
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+training:
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  output_dir: "./checkpoints/qwen-gsm8k-lora"
+  logging_steps: 10
+  save_steps: 100
+  seed: 42
+
+# Evaluation
+eval:
+  split: "test"
+  max_samples: 200
+  max_new_tokens: 512
+
+# Serving
+serve:
+  host: "0.0.0.0"
+  port: 8000
+  use_turboquant: true
+  turboquant_bits: 3
+
+# Compression
+compression:
+  bits: 3
+  max_codebook_bits: 4
+  codebook_samples: 100000

@@ -1,11 +1,44 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.ipynb_checkpoints/
 *.egg-info/
 dist/
 build/
-.env
+.venv/
+
+# ML artifacts
 *.pt
 *.bin
 *.safetensors
+*.gguf
+models/
+checkpoints/
+wandb/
+
+# Data
+data/
+*.csv
+*.parquet
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+*.swp
+
+# Environment
+.env
+.env.*
+
+# Cache
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Claude
+CLAUDE.md
+.claude/

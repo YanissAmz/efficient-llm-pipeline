@@ -9,10 +9,9 @@ Fonctions principales :
 """
 
 import re
-from typing import Optional
 
 
-def extract_answer(text: str) -> Optional[str]:
+def extract_answer(text: str) -> str | None:
     """
     Extrait la réponse numérique finale d'une solution GSM8K.
 
@@ -32,16 +31,16 @@ def extract_answer(text: str) -> Optional[str]:
         >>> extract_answer("pas de réponse ici")
         None
     """
-    if '####' not in text:
+    if "####" not in text:
         return None
 
-    after = text.split('####')[-1].strip()
+    after = text.split("####")[-1].strip()
 
     # Supprimer les séparateurs de milliers (1,234 → 1234)
-    after = after.replace(',', '')
+    after = after.replace(",", "")
 
     # Garder uniquement le premier token numérique (ignorer unités, texte après)
-    match = re.search(r'-?\d+\.?\d*', after)
+    match = re.search(r"-?\d+\.?\d*", after)
     return match.group(0) if match else None
 
 
@@ -56,8 +55,8 @@ def is_correct(pred: str, expected: str) -> bool:
         True si les réponses sont identiques après normalisation
     """
     # Extraire si contient '####', sinon utiliser tel quel
-    p = extract_answer(pred) if '####' in pred else pred.strip().replace(',', '')
-    e = extract_answer(expected) if '####' in expected else expected.strip().replace(',', '')
+    p = extract_answer(pred) if "####" in pred else pred.strip().replace(",", "")
+    e = extract_answer(expected) if "####" in expected else expected.strip().replace(",", "")
 
     if p is None or e is None:
         return False
@@ -90,15 +89,15 @@ def evaluate_batch(responses: list[str], expected: list[str]) -> dict:
     """
     assert len(responses) == len(expected), "responses et expected doivent avoir la même taille"
 
-    results   = [is_correct(r, e) for r, e in zip(responses, expected)]
+    results = [is_correct(r, e) for r, e in zip(responses, expected, strict=True)]
     no_answer = sum(1 for r in responses if extract_answer(r) is None)
 
     return {
-        'accuracy'  : sum(results) / len(results),
-        'correct'   : sum(results),
-        'total'     : len(results),
-        'no_answer' : no_answer,
-        'results'   : results,
+        "accuracy": sum(results) / len(results),
+        "correct": sum(results),
+        "total": len(results),
+        "no_answer": no_answer,
+        "results": results,
     }
 
 
@@ -112,21 +111,21 @@ def benchmark_summary(baseline: dict, turboquant: dict) -> str:
     Returns:
         str formaté pour affichage notebook/terminal
     """
-    acc_delta  = turboquant['accuracy'] - baseline['accuracy']
-    time_delta = turboquant['avg_time'] - baseline['avg_time']
-    vram_delta = turboquant['avg_vram'] - baseline['avg_vram']
+    acc_delta = turboquant["accuracy"] - baseline["accuracy"]
+    time_delta = turboquant["avg_time"] - baseline["avg_time"]  # noqa: F841
+    vram_delta = turboquant["avg_vram"] - baseline["avg_vram"]  # noqa: F841
 
     lines = [
-        '=' * 55,
-        f'{"BENCHMARK — Baseline vs TurboQuant":^55}',
-        '=' * 55,
-        f'{"":25} {"Baseline":>12} {"TurboQuant":>12}',
-        '-' * 55,
-        f'{"Accuracy GSM8K":25} {baseline["accuracy"]*100:>11.1f}% {turboquant["accuracy"]*100:>11.1f}%',
-        f'{"Δ accuracy":25} {"":>12} {acc_delta*100:>+11.1f}%',
-        f'{"Temps moyen (s)":25} {baseline["avg_time"]:>12.1f} {turboquant["avg_time"]:>12.1f}',
-        f'{"VRAM peak (GB)":25} {baseline["avg_vram"]:>12.2f} {turboquant["avg_vram"]:>12.2f}',
-        f'{"Compression KV cache":25} {"1×":>12} {turboquant["compression_ratio"]:>11.1f}×',
-        '=' * 55,
+        "=" * 55,
+        f"{'BENCHMARK -- Baseline vs TurboQuant':^55}",
+        "=" * 55,
+        f"{'':25} {'Baseline':>12} {'TurboQuant':>12}",
+        "-" * 55,
+        f"{'Accuracy GSM8K':25} {baseline['accuracy'] * 100:>11.1f}% {turboquant['accuracy'] * 100:>11.1f}%",
+        f"{'Delta accuracy':25} {'':>12} {acc_delta * 100:>+11.1f}%",
+        f"{'Temps moyen (s)':25} {baseline['avg_time']:>12.1f} {turboquant['avg_time']:>12.1f}",
+        f"{'VRAM peak (GB)':25} {baseline['avg_vram']:>12.2f} {turboquant['avg_vram']:>12.2f}",
+        f"{'Compression KV cache':25} {'1x':>12} {turboquant['compression_ratio']:>11.1f}x",
+        "=" * 55,
     ]
-    return '\n'.join(lines)
+    return "\n".join(lines)

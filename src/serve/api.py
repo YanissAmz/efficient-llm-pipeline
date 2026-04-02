@@ -16,11 +16,10 @@ Variables d'environnement :
     MAX_NEW_TOKENS : tokens max générés (défaut: 512)
 """
 
+import logging
 import os
 import time
-import logging
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import torch
 from fastapi import FastAPI, HTTPException
@@ -33,26 +32,29 @@ logger = logging.getLogger(__name__)
 # Schémas Pydantic
 # ---------------------------------------------------------------------------
 
+
 class SolveRequest(BaseModel):
     question: str = Field(..., description="Problème mathématique à résoudre", min_length=5)
     max_new_tokens: int = Field(512, ge=64, le=1024, description="Tokens max à générer")
-    use_turboquant: Optional[bool] = Field(None, description="Override compression (None = valeur serveur)")
+    use_turboquant: bool | None = Field(
+        None, description="Override compression (None = valeur serveur)"
+    )
 
 
 class SolveResponse(BaseModel):
     question: str
     answer: str
-    final_answer: Optional[str]   # valeur extraite après ####
+    final_answer: str | None  # valeur extraite après ####
     latency_ms: float
     use_turboquant: bool
-    compression_ratio: Optional[float]
+    compression_ratio: float | None
 
 
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     device: str
-    vram_used_gb: Optional[float]
+    vram_used_gb: float | None
 
 
 class InfoResponse(BaseModel):
@@ -68,16 +70,17 @@ class InfoResponse(BaseModel):
 # État global du serveur
 # ---------------------------------------------------------------------------
 
+
 class ModelState:
-    model       = None
-    tokenizer   = None
-    codebooks   = None
-    loaded      = False
-    model_name  = "Qwen/Qwen3.5-2B"
-    lora_path   = os.getenv("LORA_PATH", "./models/qwen-gsm8k-lora")
-    use_tq      = os.getenv("USE_TURBOQUANT", "true").lower() == "true"
-    tq_bits     = int(os.getenv("TURBOQUANT_BITS", "3"))
-    max_tokens  = int(os.getenv("MAX_NEW_TOKENS", "512"))
+    model = None
+    tokenizer = None
+    codebooks = None
+    loaded = False
+    model_name = "Qwen/Qwen3.5-2B"
+    lora_path = os.getenv("LORA_PATH", "./models/qwen-gsm8k-lora")
+    use_tq = os.getenv("USE_TURBOQUANT", "true").lower() == "true"
+    tq_bits = int(os.getenv("TURBOQUANT_BITS", "3"))
+    max_tokens = int(os.getenv("MAX_NEW_TOKENS", "512"))
 
 
 state = ModelState()
@@ -93,12 +96,14 @@ SYSTEM_PROMPT = (
 # Chargement du modèle (lifespan)
 # ---------------------------------------------------------------------------
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Charge le modèle au démarrage, libère la VRAM à l'arrêt."""
     logger.info("Chargement du modèle...")
     try:
         from unsloth import FastLanguageModel
+
         from src.turboquant.polar_quant import build_codebooks
 
         state.model, state.tokenizer = FastLanguageModel.from_pretrained(
@@ -146,6 +151,7 @@ app = FastAPI(
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     """Statut de l'API et du modèle."""
@@ -188,7 +194,7 @@ def solve(req: SolveRequest):
 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
-        {"role": "user",   "content": [{"type": "text", "text": req.question}]},
+        {"role": "user", "content": [{"type": "text", "text": req.question}]},
     ]
 
     inputs = state.tokenizer.apply_chat_template(
@@ -196,17 +202,20 @@ def solve(req: SolveRequest):
     ).to("cuda" if torch.cuda.is_available() else "cpu")
 
     kwargs = {
-        "input_ids"      : inputs,
-        "max_new_tokens" : req.max_new_tokens,
-        "do_sample"      : False,
+        "input_ids": inputs,
+        "max_new_tokens": req.max_new_tokens,
+        "do_sample": False,
     }
 
     compression_ratio = None
     if use_tq and state.codebooks is not None:
         from src.turboquant.polar_quant import TurboQuantCache
-        cfg = getattr(state.model.config, 'text_config', state.model.config)
+
+        cfg = getattr(state.model.config, "text_config", state.model.config)
         head_dim = cfg.hidden_size // cfg.num_attention_heads
-        cache = TurboQuantCache(dim=head_dim, bits=state.tq_bits, codebooks=state.codebooks, model=state.model)
+        cache = TurboQuantCache(
+            dim=head_dim, bits=state.tq_bits, codebooks=state.codebooks, model=state.model
+        )
         kwargs["past_key_values"] = cache
         compression_ratio = round(16 / state.tq_bits, 1)
 
@@ -215,9 +224,10 @@ def solve(req: SolveRequest):
         out = state.model.generate(**kwargs)
     latency_ms = (time.perf_counter() - t0) * 1000
 
-    response = state.tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+    response = state.tokenizer.decode(out[0][inputs.shape[1] :], skip_special_tokens=True)
 
     from src.evaluate.metrics import extract_answer
+
     final_answer = extract_answer(response)
 
     return SolveResponse(
