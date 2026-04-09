@@ -24,12 +24,32 @@ def main():
             continue
         with open(path) as f:
             data = json.load(f)
-        label = "fp16 base" if not data.get("turboquant") else f"TQ {data['bits']}-bit"
+        # Build a label like "fp16 base" / "fp16 base + LoRA-v2" / "TQ 4-bit + LoRA-v1"
+        has_lora = bool(data.get("lora_path"))
+        has_tq = bool(data.get("turboquant"))
+        if has_tq:
+            base_label = f"TQ {data['bits']}-bit"
+        else:
+            base_label = "fp16 base"
+        lora_tag = ""
+        if has_lora:
+            lp = data["lora_path"]
+            if "v2" in lp:
+                lora_tag = " + LoRA-v2"
+            elif "v1" in lp:
+                lora_tag = " + LoRA-v1"
+            else:
+                # Legacy v1 path (renamed after eval): treat as v1
+                lora_tag = " + LoRA-v1"
+        label = base_label + lora_tag
         rows.append(
             {
                 "config": label,
+                "has_lora": has_lora,
+                "has_tq": has_tq,
+                "bits": data.get("bits") or 16,
                 "compression": "1.00x"
-                if not data.get("turboquant")
+                if not has_tq
                 else f"{16 / data['bits']:.2f}x",
                 "samples": data["samples"],
                 "accuracy_pct": data["accuracy"] * 100,
@@ -46,12 +66,16 @@ def main():
         print("[error] no rows", file=sys.stderr)
         sys.exit(1)
 
-    # Sort: base first then by bits descending (4, 3, 2)
+    # Sort: (no-lora → v1 → v2) × (high bits → low bits, fp16 first)
     def sort_key(r):
-        if r["config"] == "fp16 base":
-            return (0, 0)
-        bits = int(r["config"].split()[1].replace("-bit", ""))
-        return (1, -bits)
+        lora_order = 0
+        if "v1" in r["config"]:
+            lora_order = 1
+        elif "v2" in r["config"]:
+            lora_order = 2
+        elif r["has_lora"]:
+            lora_order = 3
+        return (lora_order, -r["bits"])
 
     rows.sort(key=sort_key)
 

@@ -46,12 +46,16 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--turboquant", action="store_true")
     p.add_argument("--bits", type=int, default=3)
+    p.add_argument("--lora-path", default=None, help="path to a saved PEFT adapter")
     p.add_argument("--output", default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--attn", default="sdpa", choices=["sdpa", "eager"])
     args = p.parse_args()
 
-    print(f"[eval] loading {args.model} (attn={args.attn}, turboquant={args.turboquant})")
+    print(
+        f"[eval] loading {args.model} (attn={args.attn}, "
+        f"turboquant={args.turboquant}, lora={args.lora_path})"
+    )
     tok = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -59,6 +63,13 @@ def main():
         device_map="cuda",
         attn_implementation=args.attn,
     )
+    if args.lora_path:
+        from peft import PeftModel
+
+        print(f"[eval] loading LoRA adapter from {args.lora_path}")
+        model = PeftModel.from_pretrained(model, args.lora_path)
+        # Merge for faster inference (no LoRA adapter overhead during decode)
+        model = model.merge_and_unload()
     model.eval()
     head_dim = getattr(
         model.config,
@@ -131,6 +142,7 @@ def main():
 
     summary = {
         "model": args.model,
+        "lora_path": args.lora_path,
         "turboquant": args.turboquant,
         "bits": args.bits if args.turboquant else None,
         "samples": len(ds),
@@ -152,8 +164,10 @@ def main():
 
     out_path = args.output
     if out_path is None:
-        suffix = f"tq{args.bits}" if args.turboquant else "base"
-        out_path = f"results/eval_phi4mini_{suffix}_n{args.samples}.json"
+        parts = ["lora" if args.lora_path else "base"]
+        if args.turboquant:
+            parts.append(f"tq{args.bits}")
+        out_path = f"results/eval_phi4mini_{'_'.join(parts)}_n{args.samples}.json"
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
     full = {
