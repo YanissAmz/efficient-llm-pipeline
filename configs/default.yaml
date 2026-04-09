@@ -1,6 +1,6 @@
 # Training configuration
 model:
-  name: "Qwen/Qwen3-4B"
+  name: "microsoft/Phi-4-mini-instruct"
   max_seq_length: 1024
   load_in_4bit: true
 
@@ -24,7 +24,7 @@ training:
   warmup_ratio: 0.03
   weight_decay: 0.01
   max_grad_norm: 1.0
-  output_dir: "./checkpoints/qwen-gsm8k-lora"
+  output_dir: "./checkpoints/phi4mini-gsm8k-lora"
   logging_steps: 10
   save_steps: 100
   seed: 42

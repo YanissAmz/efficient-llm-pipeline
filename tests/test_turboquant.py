@@ -46,9 +46,20 @@ class TestTurboQuantMSE:
         cb = build_codebooks(max_bits=3)
         quant = TurboQuantMSE(dim=32, bits=2, codebooks=cb)
         x = torch.randn(4, 32)
-        idx, x_hat = quant.quantize(x)
+        idx, x_norm, x_hat = quant.quantize(x)
         assert idx.shape == x.shape
         assert x_hat.shape == x.shape
+        assert x_norm.shape == (4, 1)
+
+    def test_reconstruction_quality_high_dim(self):
+        """At high dim with enough bits, reconstruction should be much better than zero."""
+        cb = build_codebooks(max_bits=4)
+        quant = TurboQuantMSE(dim=128, bits=4, codebooks=cb)
+        x = torch.randn(64, 128) * 2.7  # mimic LLM K/V scale
+        _, _, x_hat = quant.quantize(x)
+        rel_l2 = ((x - x_hat).norm() / x.norm()).item()
+        # Recon error should be much smaller than the signal itself
+        assert rel_l2 < 0.5, f"reconstruction too lossy: rel_l2={rel_l2:.3f}"
 
 
 class TestTurboQuantProd:
@@ -56,15 +67,15 @@ class TestTurboQuantProd:
         cb = build_codebooks(max_bits=3)
         quant = TurboQuantProd(dim=32, bits=3, codebooks=cb)
         x = torch.randn(4, 32)
-        _idx, _qjl_bits, _r_norm, x_hat = quant.quantize(x)
+        _idx, _qjl_bits, _r_norm, _mse_norm, x_hat = quant.quantize(x)
         assert x_hat.shape == x.shape
 
     def test_dequantize_matches(self):
         cb = build_codebooks(max_bits=3)
         quant = TurboQuantProd(dim=32, bits=3, codebooks=cb)
         x = torch.randn(4, 32)
-        idx, qjl_bits, r_norm, x_hat = quant.quantize(x)
-        x_recon = quant.dequantize(idx, qjl_bits, r_norm)
+        idx, qjl_bits, r_norm, mse_norm, x_hat = quant.quantize(x)
+        x_recon = quant.dequantize(idx, qjl_bits, r_norm, mse_norm)
         assert torch.allclose(x_hat, x_recon, atol=1e-5)
 
     def test_compression_reduces_error(self):
@@ -74,9 +85,23 @@ class TestTurboQuantProd:
         errors = {}
         for bits in [2, 3, 4]:
             quant = TurboQuantProd(dim=64, bits=bits, codebooks=cb)
-            _, _, _, x_hat = quant.quantize(x)
+            *_, x_hat = quant.quantize(x)
             errors[bits] = (x - x_hat).norm().item()
         assert errors[4] < errors[2]
+
+    def test_unbiased_inner_product(self):
+        """TurboQuantProd is unbiased: E[<y, x_hat>] ~ <y, x>."""
+        cb = build_codebooks(max_bits=4)
+        quant = TurboQuantProd(dim=128, bits=4, codebooks=cb)
+        torch.manual_seed(0)
+        # Many random vectors so the unbiased estimator concentrates
+        x = torch.randn(2048, 128) * 2.0
+        y = torch.randn(2048, 128) * 2.0
+        *_, x_hat = quant.quantize(x)
+        true_ips = (x * y).sum(dim=-1)
+        est_ips = (x_hat * y).sum(dim=-1)
+        rel_err = ((est_ips - true_ips).mean().abs() / true_ips.abs().mean()).item()
+        assert rel_err < 0.05, f"inner-product bias too large: {rel_err:.3f}"
 
 
 class TestTurboQuantCache:

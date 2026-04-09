@@ -11,11 +11,13 @@ Usage:
 """
 
 import math
+from functools import partial
 
 import numpy as np
 import torch
 import torch.nn as nn
 from transformers import DynamicCache
+from transformers.cache_utils import DynamicLayer
 
 # ---------------------------------------------------------------------------
 # Codebooks Lloyd-Max
@@ -60,19 +62,26 @@ def build_codebooks(max_bits: int = 4, n_samples: int = 100_000) -> dict:
 
 class TurboQuantMSE(nn.Module):
     """
-    Quantificateur MSE-optimal : rotation aléatoire + Lloyd-Max.
+    Quantificateur MSE-optimal : normalisation + rotation aléatoire + Lloyd-Max.
 
     Étapes :
-        1. y = Π·x  (rotation orthogonale)  →  coords ~ N(0, 1/d)
-        2. idx = argmin_k |y_j/scale - c_k|  (codebook Lloyd-Max)
-        3. x̃ = Πᵀ · (c_{idx} * scale)       (reconstruction)
+        1. n = ‖x‖₂           (norme par vecteur, stockée séparément)
+        2. u = x / n          (vecteur unitaire)
+        3. y = Π·u            (rotation orthogonale)  →  y_j ~ N(0, 1/d)
+        4. ỹ = y · √d         →  ỹ_j ~ N(0, 1)
+        5. idx = argmin_k |ỹ_j - c_k|  (codebook Lloyd-Max sur N(0,1))
+        6. ŷ = c_{idx} / √d   (reconstruction unitaire)
+        7. x̂ = n · (Πᵀ · ŷ)   (rescale par la norme stockée)
+
+    Le scaling par ‖x‖ est crucial : sans lui le codebook clippe massivement
+    pour des vecteurs non-unitaires (ex : K/V d'un LLM avec std ~2.7).
     """
 
     def __init__(self, dim: int, bits: int, codebooks: dict, seed: int = 42):
         super().__init__()
         self.dim = dim
         self.bits = bits
-        self.scale = 1.0 / (dim**0.5)
+        self.sqrt_d = dim**0.5
 
         torch.manual_seed(seed)
         Q, _ = torch.linalg.qr(torch.randn(dim, dim))
@@ -82,23 +91,32 @@ class TurboQuantMSE(nn.Module):
         self.register_buffer("codebook", cb)
 
     def quantize(self, x: torch.Tensor):
-        """x : (..., dim)  →  (idx, x_hat)"""
+        """x : (..., dim)  →  (idx, x_norm, x_hat)"""
         shape = x.shape
         x_flat = x.reshape(-1, self.dim).float()
 
-        y = x_flat @ self.rotation.T
-        y_norm = y / self.scale
+        x_norm = x_flat.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        u = x_flat / x_norm
 
-        dists = (y_norm.unsqueeze(-1) - self.codebook).abs()
+        y = u @ self.rotation.T
+        y_scaled = y * self.sqrt_d  # → coordinates ~ N(0, 1)
+
+        dists = (y_scaled.unsqueeze(-1) - self.codebook).abs()
         idx = dists.argmin(dim=-1)
 
-        y_hat = self.codebook[idx] * self.scale
-        x_hat = y_hat @ self.rotation
+        y_hat_scaled = self.codebook[idx]
+        y_hat = y_hat_scaled / self.sqrt_d
+        u_hat = y_hat @ self.rotation
+        x_hat = u_hat * x_norm
 
-        return idx.reshape(shape), x_hat.reshape(shape)
+        return (
+            idx.reshape(shape),
+            x_norm.reshape(*shape[:-1], 1),
+            x_hat.reshape(shape),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, x_hat = self.quantize(x)
+        _, _, x_hat = self.quantize(x)
         return x_hat
 
 
@@ -135,12 +153,13 @@ class TurboQuantProd(nn.Module):
     def quantize(self, x: torch.Tensor):
         """
         x : (..., dim)
-        →  (idx, qjl_bits, residual_norm, x_hat)
+        →  (idx, qjl_bits, residual_norm, mse_norm, x_hat)
         """
         shape = x.shape
         x_flat = x.reshape(-1, self.dim).float()
 
-        idx, x_mse = self.mse.quantize(x_flat)
+        idx, mse_norm, x_mse_flat = self.mse.quantize(x_flat)
+        x_mse = x_mse_flat  # already (N, dim) since x_flat was
 
         r = x_flat - x_mse
         r_norm = r.norm(dim=-1, keepdim=True)
@@ -153,14 +172,19 @@ class TurboQuantProd(nn.Module):
             idx.reshape(shape),
             qjl_bits.reshape(shape),
             r_norm.reshape(*shape[:-1], 1),
+            mse_norm.reshape(*shape[:-1], 1),
             x_hat.reshape(shape),
         )
 
-    def dequantize(self, idx, qjl_bits, r_norm) -> torch.Tensor:
+    def dequantize(self, idx, qjl_bits, r_norm, mse_norm) -> torch.Tensor:
         """Reconstruction depuis les données compressées stockées."""
         shape = idx.shape
-        y_hat = self.mse.codebook[idx.reshape(-1, self.dim)] * self.mse.scale
-        x_mse = y_hat @ self.mse.rotation
+        idx_flat = idx.reshape(-1, self.dim)
+        y_hat_scaled = self.mse.codebook[idx_flat]
+        y_hat = y_hat_scaled / self.mse.sqrt_d
+        u_hat = y_hat @ self.mse.rotation
+        x_mse = u_hat * mse_norm.reshape(-1, 1)
+
         correction = (
             self.qjl_scale
             * r_norm.reshape(-1, 1)
@@ -169,7 +193,7 @@ class TurboQuantProd(nn.Module):
         return (x_mse + correction).reshape(shape)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, _, _, x_hat = self.quantize(x)
+        *_, x_hat = self.quantize(x)
         return x_hat
 
 
@@ -178,103 +202,94 @@ class TurboQuantProd(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+class TurboQuantLayer(DynamicLayer):
+    """
+    Per-layer TurboQuant cache. Drop-in replacement for `DynamicLayer`.
+
+    Compresses incoming K/V into a packed (idx, qjl_bits, r_norm) representation.
+    On every update, materializes the dequantized full K/V tensors back into
+    `self.keys` / `self.values` so the parent `Cache` machinery (get_seq_length,
+    masking, position ids, ...) sees the correct shapes.
+    """
+
+    def __init__(self, quantizer: "TurboQuantProd"):
+        super().__init__()
+        self.quantizer = quantizer
+        # Stored as 4-tuples: (idx, qjl_bits, r_norm, mse_norm)
+        self._comp_k = None
+        self._comp_v = None
+
+    def get_seq_length(self, cache_position=None) -> int:
+        if self._comp_k is None:
+            return 0
+        return self._comp_k[0].shape[-2]
+
+    def update(self, key_states, value_states, *args, **kwargs):
+        # Move quantizer to the right device on first call
+        if any(b.device != key_states.device for b in self.quantizer.buffers()):
+            self.quantizer = self.quantizer.to(key_states.device)
+
+        dtype = key_states.dtype
+
+        # Quantize new chunk
+        k_idx, k_qjl, k_rnorm, k_mnorm, _ = self.quantizer.quantize(key_states)
+        v_idx, v_qjl, v_rnorm, v_mnorm, _ = self.quantizer.quantize(value_states)
+
+        new_k = (k_idx, k_qjl, k_rnorm, k_mnorm)
+        new_v = (v_idx, v_qjl, v_rnorm, v_mnorm)
+
+        if self._comp_k is None:
+            self._comp_k = new_k
+            self._comp_v = new_v
+        else:
+            self._comp_k = tuple(
+                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_k, new_k, strict=True)
+            )
+            self._comp_v = tuple(
+                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_v, new_v, strict=True)
+            )
+
+        # Dequantize FULL accumulated state
+        full_k = self.quantizer.dequantize(*self._comp_k).to(dtype)
+        full_v = self.quantizer.dequantize(*self._comp_v).to(dtype)
+
+        # Populate parent attrs so get_seq_length / masking work
+        self.keys = full_k
+        self.values = full_v
+        self.is_initialized = True
+
+        return full_k, full_v
+
+
 class TurboQuantCache(DynamicCache):
     """
-    Cache KV compressé avec TurboQuant.
-    Drop-in replacement pour HuggingFace DynamicCache.
+    KV cache compressed with TurboQuant (PolarQuant + QJL).
+    Drop-in replacement for HuggingFace `DynamicCache` (transformers >= 5.4 API).
 
-    À chaque update() : compresse K et V avant stockage.
-    Retourne les versions décompressées pour l'attention (unbiaisées).
+    On every layer update : compresses K and V before storage, returns the
+    dequantized versions for attention (unbiased in expectation).
 
     Args:
-        dim      : head_dim du modèle  (hidden_size // num_attention_heads)
-        bits     : bits de compression (3 = bon compromis vitesse/qualité)
-        codebooks: dict retourné par build_codebooks()
+        dim      : head_dim of the model (hidden_size // num_attention_heads)
+        bits     : compression bits (3 = good speed/quality tradeoff)
+        codebooks: dict returned by build_codebooks()
     """
 
-    def __init__(self, dim: int, bits: int, codebooks: dict, model=None):
-        super().__init__()
-        self.quantizer = TurboQuantProd(dim, bits, codebooks)
-        self._comp_k = {}
-        self._comp_v = {}
-        self.key_cache = []
-        self.value_cache = []
+    def __init__(self, dim: int, bits: int, codebooks: dict):
+        # Build the shared quantizer first — all layers reuse the same rotation/codebook/S
+        self._quantizer = TurboQuantProd(dim, bits, codebooks)
+        self.dim = dim
         self.bits = bits
         self.bits_original = 0
 
-        # Attributs requis par les couches GatedDeltaNet (linear attention) de Qwen3.5
-        self.has_previous_state = False
-        self.conv_states = {}
-        self.recurrent_states = {}
+        # Initialize the parent with the default DynamicLayer factory, then swap
+        super().__init__()
+        self.layer_class_to_replicate = partial(TurboQuantLayer, quantizer=self._quantizer)
 
-        if model is not None:
-            self._init_recurrent_states(model)
-
-    def _init_recurrent_states(self, model):
-        """Pré-alloue les états zéro pour les couches GatedDeltaNet de Qwen3.5."""
-        device = next(model.parameters()).device
-        dtype = next(model.parameters()).dtype
-
-        for _, mod in model.named_modules():
-            if not (hasattr(mod, "conv1d") and hasattr(mod, "layer_idx")):
-                continue
-            idx = mod.layer_idx
-
-            # Conv state : (batch=1, conv_dim, d_conv)
-            conv_dim = mod.conv1d.weight.shape[0]
-            d_conv = mod.conv1d.weight.shape[2]
-            self.conv_states[idx] = torch.zeros(1, conv_dim, d_conv, device=device, dtype=dtype)
-
-            # Recurrent state : (batch=1, num_v_heads, head_v_dim, head_k_dim)
-            nv = getattr(mod, "num_v_heads", getattr(mod, "num_k_heads", None))
-            hv = getattr(mod, "head_v_dim", None)
-            hk = getattr(mod, "head_k_dim", None)
-            if nv and hv and hk:
-                self.recurrent_states[idx] = torch.zeros(1, nv, hv, hk, device=device, dtype=dtype)
-
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
-        device = key_states.device
-        dtype = key_states.dtype
-        self.quantizer = self.quantizer.to(device)
-
-        # Quantize les nouveaux KV
-        k_idx, k_qjl, k_norm, _ = self.quantizer.quantize(key_states)
-        v_idx, v_qjl, v_norm, _ = self.quantizer.quantize(value_states)
-
-        # Stocker les données compressées
-        if layer_idx not in self._comp_k:
-            self._comp_k[layer_idx] = (k_idx, k_qjl, k_norm)
-            self._comp_v[layer_idx] = (v_idx, v_qjl, v_norm)
-        else:
-            ok = self._comp_k[layer_idx]
-            ov = self._comp_v[layer_idx]
-            self._comp_k[layer_idx] = (
-                torch.cat([ok[0], k_idx], dim=2),
-                torch.cat([ok[1], k_qjl], dim=2),
-                torch.cat([ok[2], k_norm], dim=2),
-            )
-            self._comp_v[layer_idx] = (
-                torch.cat([ov[0], v_idx], dim=2),
-                torch.cat([ov[1], v_qjl], dim=2),
-                torch.cat([ov[2], v_norm], dim=2),
-            )
-
+    def update(self, key_states, value_states, layer_idx, *args, **kwargs):
+        # Track theoretical original bit count (fp16 baseline) for compression accounting
         self.bits_original += (key_states.numel() + value_states.numel()) * 16
-
-        # Décompresser le cache COMPLET et laisser le parent DynamicCache gérer le stockage
-        ck = self._comp_k[layer_idx]
-        cv = self._comp_v[layer_idx]
-        full_k = self.quantizer.dequantize(ck[0], ck[1], ck[2]).to(dtype)
-        full_v = self.quantizer.dequantize(cv[0], cv[1], cv[2]).to(dtype)
-
-        # Remplacer dans le cache parent (DynamicCache utilise des listes indexées séquentiellement)
-        while layer_idx >= len(self.key_cache):
-            self.key_cache.append(torch.empty(0))
-            self.value_cache.append(torch.empty(0))
-        self.key_cache[layer_idx] = full_k
-        self.value_cache[layer_idx] = full_v
-
-        return full_k, full_v
+        return super().update(key_states, value_states, layer_idx, *args, **kwargs)
 
     @property
     def compression_ratio(self) -> float:
