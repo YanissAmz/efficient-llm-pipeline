@@ -84,8 +84,7 @@ def test_cache_seq_length_grows_correctly(tiny_llama, codebooks):
     expected = input_ids.shape[1] + 5 - 1
     for layer_idx, layer in enumerate(cache.layers):
         assert layer.get_seq_length() == expected, (
-            f"layer {layer_idx} reports seq_length="
-            f"{layer.get_seq_length()}, expected {expected}"
+            f"layer {layer_idx} reports seq_length={layer.get_seq_length()}, expected {expected}"
         )
 
 
@@ -111,7 +110,7 @@ def test_two_pass_forward_uses_cache(tiny_llama, codebooks):
 
 def test_compression_ratio_property(tiny_llama, codebooks):
     """The compression_ratio property must reflect the bit budget."""
-    model, cfg = tiny_llama
+    _, cfg = tiny_llama
     for bits in [2, 3, 4]:
         cache = TurboQuantCache(dim=cfg.head_dim, bits=bits, codebooks=codebooks)
         assert cache.compression_ratio == pytest.approx(16 / bits)
@@ -132,5 +131,5 @@ def test_output_is_not_garbage(tiny_llama, codebooks):
         out = model(input_ids=input_ids, past_key_values=cache, use_cache=True)
 
     assert torch.isfinite(out.logits).all(), "logits contain NaN/Inf"
-    assert (cache.layers[0].keys.abs().sum() > 0), "reconstructed K is all-zero"
-    assert (cache.layers[0].values.abs().sum() > 0), "reconstructed V is all-zero"
+    assert cache.layers[0].keys.abs().sum() > 0, "reconstructed K is all-zero"
+    assert cache.layers[0].values.abs().sum() > 0, "reconstructed V is all-zero"

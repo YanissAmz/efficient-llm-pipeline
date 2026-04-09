@@ -243,10 +243,10 @@ class TurboQuantLayer(DynamicLayer):
             self._comp_v = new_v
         else:
             self._comp_k = tuple(
-                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_k, new_k)
+                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_k, new_k, strict=True)
             )
             self._comp_v = tuple(
-                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_v, new_v)
+                torch.cat([old, new], dim=-2) for old, new in zip(self._comp_v, new_v, strict=True)
             )
 
         # Dequantize FULL accumulated state
