@@ -13,21 +13,36 @@ End-to-end implementation and honest evaluation of **TurboQuant KV cache compres
 
 ## Headline results
 
-> 50 GSM8K test samples + 50 HellaSwag validation samples on `Phi-4-mini-instruct`, RTX 3090, bf16, greedy decoding (GSM8K) / length-normalized loglikelihood (HellaSwag), seed=42.
+> 50 GSM8K test samples + 50 HellaSwag validation samples, RTX 3090, bf16, greedy decoding (GSM8K) / length-normalized loglikelihood (HellaSwag), seed=42. Raw JSON outputs in `results/`.
 
-| Configuration | KV bits | Compression | **GSM8K** (math reasoning) | **HellaSwag** (commonsense) |
-|---|---|---|---|---|
-| fp16 baseline | 16 | 1.00× | **90.0%** (45/50) | **62.0%** (31/50) |
-| **TurboQuant 4-bit** | 4 | **4.00×** | **80.0%** (40/50)  ▼10 | **60.0%** (30/50)  ▼2 |
-| **TurboQuant 3-bit** | 3 | **5.33×** | **0.0%** (0/50)  ▼90 *collapse* | **52.0%** (26/50)  ▼10 |
-| fp16 + LoRA-v2 *(gentle)* | 16 | 1.00× | 76.0% (38/50)  ▼14 | — |
-| TQ 4-bit + LoRA-v2 | 4 | 4.00× | 60.0% (30/50) | — |
+### Per-model comparison (50 samples)
 
-**Three findings the table makes visible :**
+| Model | Config | KV bits | Compression | **GSM8K** | **HellaSwag** |
+|---|---|---|---|---|---|
+| `Phi-4-mini-instruct` (3.8B, 8 KV heads, 32 layers) | fp16 baseline | 16 | 1.00× | **90.0%** | **62.0%** |
+|  | TurboQuant 4-bit | 4 | 4.00× | **80.0%** ▼10 | 60.0% ▼2 |
+|  | TurboQuant 3-bit | 3 | 5.33× | 0.0% ▼90 *collapse* | **52.0%** ▼10 |
+| `Qwen2.5-3B-Instruct` (3B, **2 KV heads**, **36 layers**) | fp16 baseline | 16 | 1.00× | **70.0%** | — |
+|  | TurboQuant 4-bit | 4 | 4.00× | **0.0% ⚠ collapse** | — |
+|  | TurboQuant 3-bit | 3 | 5.33× | 0.0% ▼70 | — |
 
-1. **TurboQuant 4-bit is a viable operating point.** A 4× KV cache compression for a –2 to –10 accuracy point cost depending on task difficulty. On a long-context workload this could enable significantly larger KV-cache budgets without proportional VRAM growth.
-2. **The break point of TurboQuant is task-dependent, not bit-budget-dependent.** TurboQuant 3-bit collapses on GSM8K because multi-step arithmetic requires preserving exact key/value alignment over many decoded tokens — but the same compression survives HellaSwag with manageable degradation, because commonsense scoring depends on a single forward conditioned on a short context. The 3-bit operating point is **usable on the right workload**.
-3. **Fine-tuning a strong instruct model on a small reasoning dataset can hurt.** Two LoRA regimes (lr=2e-4 / 1ep and lr=5e-5 / 0.5ep) both land at exactly the same 76% on GSM8K (–14pts vs base), with much shorter outputs (99 tokens vs 192). The model learns the *surface format* of GSM8K answers (`<<X*Y=Z>>` calculator annotations + `#### N` ending) but loses some plain-English reasoning robustness. **Naïve fine-tuning of Phi-4-mini-instruct on GSM8K is not a positive intervention.**
+### LoRA fine-tuning (Phi-4-mini, 50 samples)
+
+| Configuration | GSM8K | Δ vs fp16 base | Avg new tokens |
+|---|---|---|---|
+| fp16 base | 90.0% | — | 192 |
+| fp16 + LoRA-v1 *(lr=2e-4, 1ep)* | 76.0% | –14 | 99 |
+| fp16 + LoRA-v2 *(lr=5e-5, 0.5ep)* | 76.0% | –14 | 103 |
+| TQ 4-bit + LoRA-v2 | 60.0% | –30 | 117 |
+
+---
+
+**Four findings the table makes visible :**
+
+1. **TurboQuant 4-bit is a viable operating point on the right architecture.** On Phi-4-mini, 4× KV cache compression for a –2 to –10 accuracy point cost depending on task difficulty.
+2. **The break point of TurboQuant is task-dependent, not bit-budget-dependent.** On Phi-4-mini, TurboQuant 3-bit collapses on GSM8K because multi-step arithmetic requires preserving exact key/value alignment over many decoded tokens — but the same compression survives HellaSwag with manageable degradation.
+3. **TurboQuant is *also* architecture-dependent, and the per-vector reconstruction metric lies about it.** Reconstruction quality on real K/V at 4 bits is identical on Phi-4-mini and Qwen2.5-3B (`cos_sim ≈ 0.97`). And yet TurboQuant 4-bit collapses on Qwen2.5-3B (0% vs 70% base). Three architectural properties explain the gap : (a) Qwen2.5-3B has **2 KV heads shared across 16 Q heads** vs Phi's **8 KV heads across 24 Q heads**, so each reconstruction error is amplified by 8×/3× ≈ 2.7×; (b) Qwen has **36 layers vs 32**, so errors compound through more steps; (c) early-layer activations are more extreme on Qwen (`k.abs.max ≈ 92` vs `17` on Phi), so the Lloyd-Max codebook — trained on a `N(0,1)` distribution — sees values deeper into its tails. **Per-vector L2 is a necessary but not sufficient metric for a KV cache quantizer.**
+4. **Naïve LoRA fine-tuning of a strong instruct model can hurt.** Two LoRA regimes on Phi-4-mini (lr=2e-4 / 1ep and lr=5e-5 / 0.5ep) both land at exactly the same 76% on GSM8K (–14pts vs base), with much shorter outputs (99 tokens vs 192). The model learns the *surface format* of GSM8K answers (`<<X*Y=Z>>` calculator annotations + `#### N` ending) but loses some plain-English reasoning robustness. Documented honestly rather than hyperparameter-tuned toward a positive headline.
 
 ---
 
@@ -163,35 +178,56 @@ results/                   Raw eval JSON + comparison Markdown
 
 | | |
 |---|---|
-| **Model** | `microsoft/Phi-4-mini-instruct` (3.8B, pure transformer GQA, 32 layers, head_dim=128) |
+| **Primary model** | `microsoft/Phi-4-mini-instruct` (3.8B, 32 layers, 24 Q heads, **8 KV heads**, head_dim=128) |
+| **Cross-arch model** | `Qwen/Qwen2.5-3B-Instruct` (3B, 36 layers, 16 Q heads, **2 KV heads**, head_dim=128) |
 | **Fine-tuning** | `peft` LoRA (r=16, α=32, target q/k/v/o_proj), vanilla `transformers.Trainer`, bf16 |
 | **Compression** | TurboQuant (PolarQuant + QJL), `transformers ≥ 5.4` `Cache` API |
 | **Eval** | GSM8K (greedy CoT, exact match) + HellaSwag (2-pass loglikelihood) |
+| **Serving** | FastAPI + Uvicorn (`src/serve/api.py`) — env-driven, optional LoRA + TurboQuant |
 | **GPU** | NVIDIA RTX 3090 24 GB |
 | **Stack** | `transformers 5.4`, `peft 0.18`, `torch 2.10+cu128`, `datasets 4.3` |
-| **CI** | GitHub Actions (`ruff` + `pytest`) |
+| **CI** | GitHub Actions (`ruff` + `pytest`, runs on all branches) |
 
 No Unsloth, no bnb 4-bit. The rebuild deliberately uses the most boring vanilla path so that the *only* nontrivial component is TurboQuant itself.
 
 ---
 
+## Serving
+
+```bash
+MODEL_NAME=microsoft/Phi-4-mini-instruct \
+USE_TURBOQUANT=true \
+TURBOQUANT_BITS=4 \
+uvicorn src.serve.api:app --host 0.0.0.0 --port 8000
+
+# Solve a math problem
+curl -s http://localhost:8000/solve -H 'Content-Type: application/json' \
+  -d '{"question": "If a train travels 120 km in 2 hours, what is its average speed in km/h?"}' \
+  | jq '.'
+```
+
+Endpoints: `GET /health`, `GET /info`, `POST /solve`. The `solve` endpoint accepts a per-request `use_turboquant` and `bits` override so you can A/B test a single model instance on the fly. Optional LoRA adapter loading via `LORA_PATH=...`.
+
+---
+
 ## Limitations & honest caveats
 
-- **Sample count.** All accuracy numbers above are on 50 samples per config. On GSM8K test (1.3k samples) and HellaSwag validation (10k), the numbers will move by ±3-5pts. The qualitative ranking (TQ4 ≪ collapse, HellaSwag tolerates more compression than GSM8K) is robust to this.
-- **Latency overhead.** TurboQuant adds ~2× wall-clock latency in this implementation because the quantize/dequantize roundtrip happens in plain PyTorch (no kernel fusion). This is fixable with a CUDA kernel but out of scope for the rebuild.
-- **VRAM is unchanged.** This implementation stores **both** the compressed indices and the dequantized K/V (the latter is what attention reads). Real VRAM savings would come from dequantizing on the fly inside the attention kernel — that's the natural next step.
-- **No Unsloth comparison.** Step 0 of the rebuild deliberately removed Unsloth because its compiled cache hijacks the attention forward and made TurboQuant impossible to integrate. Adding it back as a *speed* optimization (after the baseline is green) is on the roadmap.
-- **Single model.** Generalization across model families (Llama, Qwen, Mistral) is not yet validated. Phi-4-mini was chosen for being a recent pure-transformer GQA model with no SWA/multimodal/hybrid weirdness.
+- **Sample count.** The headline table is 50 samples per config. Full GSM8K test (1.3k samples) and HellaSwag validation (10k) would move these by ±3-5pts; the qualitative ranking (Phi-4-mini tolerates TQ4, Qwen2.5-3B collapses at TQ4, GSM8K breaks before HellaSwag) is robust.
+- **Architecture coverage.** Two models is enough to *falsify* the naïve "TurboQuant works everywhere" narrative (it doesn't work on Qwen2.5-3B at 4 bits), but not enough to *quantify* the boundary. A broader sweep over KV head count / depth / outlier profile is a natural next step.
+- **Latency overhead.** TurboQuant adds ~2× wall-clock latency in this implementation because the quantize/dequantize roundtrip happens in plain PyTorch (no kernel fusion). Fixable with a CUDA kernel.
+- **VRAM is unchanged in memory.** This implementation stores *both* the compressed indices and the dequantized K/V (the latter is what attention reads). The compression ratio is *theoretical* — a real win requires dequantizing on the fly inside the attention kernel.
+- **No Unsloth.** Step 0 of the rebuild deliberately removed Unsloth because its compiled cache hijacks the attention forward and made TurboQuant impossible to integrate. Adding it back as a *speed* optimization on top of a proven baseline is on the roadmap.
 
 ---
 
 ## Roadmap
 
 - [ ] Custom CUDA kernel for fused dequant + attention → real VRAM and latency wins
-- [ ] Run the same matrix on Llama-3.2-3B and Qwen2.5-3B for cross-architecture validation
+- [ ] Broader cross-arch sweep (Llama-3.2-3B, Mistral-7B, Gemma-2-2B) to map the "TurboQuant works vs collapses" boundary as a function of `num_kv_heads`, `num_hidden_layers`, and early-layer activation outliers
+- [ ] Outlier-aware variant : learned per-layer calibration on top of the random rotation to handle models like Qwen2.5-3B that have early-layer `abs.max > 90`
 - [ ] Larger sample counts (full GSM8K test, full HellaSwag validation) for tighter error bars
-- [ ] CI integration test : `tests/test_turboquant_integration.py` running the smoke on Phi-4-mini
-- [ ] FastAPI serve endpoint with the proven LoRA-v2 + TQ-4-bit configuration
+- [x] CI integration test (`tests/test_turboquant_integration.py`)
+- [x] FastAPI `serve` endpoint with optional LoRA + TurboQuant
 
 ---
 
